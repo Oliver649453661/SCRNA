@@ -1,0 +1,907 @@
+import os
+import re
+import glob
+import pathlib as pl
+
+configfile: os.path.join(workflow.basedir, "../config/config.yaml")
+
+RAW_ROOT = "data/raw"
+
+# ---------- 自动发现样本目录 ----------
+sample_dirs = sorted([d for d in glob.glob(os.path.join(RAW_ROOT, "*")) if os.path.isdir(d)])
+if not sample_dirs:
+    raise ValueError(f"No sample folders under {RAW_ROOT}. Expected e.g. data/raw/Cd_1, PS-NPs_2 ...")
+
+# 解析 sample 名、group、rep
+SAMPLES = []
+META = []
+for d in sample_dirs:
+    name = pl.Path(d).name  # e.g. "Cd_1"
+    m = re.match(r"(.+)[_-]([0-9]+)$", name)
+    if m:
+        group, rep = m.group(1), int(m.group(2))
+    else:
+        group, rep = name, None
+    SAMPLES.append(name)
+    META.append({"sample": name, "group": group, "replicate": rep, "raw_dir": d})
+
+# 为每个样本列出所有 R1/R2 fastq.gz（兼容多种命名）
+def find_reads(sample):
+    d = os.path.join(RAW_ROOT, sample)
+    r1_patterns = [os.path.join(d, "*R1*.fastq.gz"), os.path.join(d, "*_1.f*q.gz")]
+    r2_patterns = [os.path.join(d, "*R2*.fastq.gz"), os.path.join(d, "*_2.f*q.gz")]
+    r1 = sorted({p for pat in r1_patterns for p in glob.glob(pat)})
+    r2 = sorted({p for pat in r2_patterns for p in glob.glob(pat)})
+    if not r1 or not r2:
+        raise ValueError(f"[{sample}] missing R1/R2 under {d}")
+    return r1, r2
+
+SAMPLE_FILES = {s: {"r1": find_reads(s)[0], "r2": find_reads(s)[1]} for s in SAMPLES}
+
+# 输出路径工具函数
+def merged_r1(sample):
+    return f"data/clean/{sample}/{sample}_R1.raw.fastq.gz"
+
+def merged_r2(sample):
+    return f"data/clean/{sample}/{sample}_R2.raw.fastq.gz"
+
+rule all:
+    input:
+        # 样本元数据
+        "results/qc/samples_meta.tsv",
+        # QC 汇总
+        f"{config['outdir_qc']}/multiqc/multiqc_report.html",
+        # splici 索引
+        config["salmon_index"],
+        # 每个样本 quant.json
+        expand(f"{config['outdir_af']}/{{sample}}/quant/af_quant/quant.json", sample=SAMPLES),
+        # AnnData 对象（每个样本）
+        expand("results/anndata/{sample}_raw.h5ad", sample=SAMPLES),
+        # 合并的 AnnData
+        "results/anndata/merged_raw.h5ad",
+        # QC 后的数据
+        "results/anndata/merged_qc.h5ad",
+        # 标准化和高变基因
+        "results/anndata/merged_normalized.h5ad",
+        # PCA 和 UMAP
+        "results/anndata/merged_processed.h5ad",
+        # 批次效应校正
+        "results/anndata/merged_batch_corrected.h5ad",
+        "results/plots/batch_correction_comparison.pdf",
+        # 聚类结果
+        "results/anndata/merged_clustered.h5ad",
+        # 可视化图片
+        "results/plots/qc_violin.pdf",
+        "results/plots/umap_clusters.pdf",
+        "results/plots/umap_groups.pdf",
+        # Marker genes
+        "results/markers/cluster_markers.csv",
+        # 细胞类型注释（基于 Fly Cell Atlas）
+        "results/annotation/cell_type_annotated.h5ad",
+        "results/annotation/cell_type_predictions.csv",
+        "results/plots/cell_type_annotation_umap.pdf",
+        # 肠道区域注释
+        "results/annotation/gut_region_annotated.h5ad",
+        "results/annotation/gut_region_scores.csv",
+        "results/plots/gut_region_annotation.pdf",
+        # 差异表达分析（全局）
+        "results/de/group_comparison.csv",
+        # Per-cell-type 差异表达分析
+        "results/de/per_celltype",
+        "results/de/per_celltype_summary.csv",
+        "results/plots/de_per_celltype.pdf",
+        # 细胞比例分析
+        "results/composition/cell_proportions.csv",
+        "results/composition/composition_stats.csv",
+        "results/plots/cell_composition.pdf",
+        # Per-cell-type 富集分析
+        "results/enrichment/per_celltype",
+        "results/enrichment/per_celltype_summary.csv",
+        "results/plots/enrichment_per_celltype.pdf",
+        # 补充分析1: 金属响应基因分析
+        "results/figures/supplementary/metal_response_heatmap.pdf",
+        "results/figures/supplementary/metal_response_genes.csv",
+        # 补充分析2: 细胞类型特异性DE热图
+        "results/figures/supplementary/celltype_de_heatmap.pdf",
+        # 补充分析3: 伪时序分析
+        "results/figures/supplementary/pseudotime_trajectory.pdf",
+        "results/annotation/pseudotime_annotated.h5ad",
+        # 补充分析4: 细胞通讯分析
+        "results/figures/supplementary/cell_communication.pdf",
+        "results/communication/communication_results.csv",
+        # 补充分析5: 转录因子活性分析
+        "results/figures/supplementary/tf_activity.pdf",
+        "results/tf_analysis/tf_activity_scores.csv",
+        # 基因ID到symbol的映射表
+        "data/reference/gene_id_to_symbol.csv",
+        # 补充可视化：火山图
+        "results/plots/volcano_global.pdf",
+        "results/plots/volcano_per_celltype",
+        # 补充可视化：UpSet图（DEG重叠分析）
+        "results/plots/upset_deg_overlap.pdf",
+        "results/de/deg_overlap.csv",
+        # 统计汇总表格
+        "results/summary",
+        # 通路网络图
+        "results/plots/pathway_network.pdf",
+        "results/enrichment/pathway_network.csv",
+        # 补充分析6: Marker基因可视化（热图和点图）
+        "results/plots/marker_heatmap.pdf",
+        "results/plots/marker_dotplot.pdf",
+        # 补充分析7: 出版级图表
+        "results/figures/publication",
+        # 补充分析8: 最终分析报告
+        "results/reports/final_report.html",
+        # ========== 交互式可视化 (CellxGene) - 必须放在最后 ==========
+        "results/visualization/cellxgene_data.h5ad",
+        "results/visualization/cellxgene_info.md"
+
+# ========== 参考基因组注释处理 ==========
+
+# ---------- 从GTF提取基因ID到gene symbol的映射 ----------
+rule extract_gene_mapping:
+    input:
+        gtf=config.get("genome_gtf", "data/reference/gtf/Drosophila_melanogaster.BDGP6.32.109.gtf")
+    output:
+        mapping="data/reference/gene_id_to_symbol.csv"
+    log:
+        "logs/extract_gene_mapping.log"
+    conda: "../env/analysis_env.yml"
+    threads: 1
+    script:
+        "../scripts/extract_gene_mapping.py"
+
+# ---------- 导出样本元数据表 ----------
+rule write_meta:
+    output:
+        "results/qc/samples_meta.tsv"
+    log:
+        "logs/write_meta.log"
+    threads: 1
+    run:
+        import os
+        os.makedirs("results/qc", exist_ok=True)
+        os.makedirs("logs", exist_ok=True)
+        # META 是一个列表，每个元素是 {"sample": ..., "group": ..., "replicate": ...}
+        with open(output[0], 'w') as f:
+            f.write("sample\tgroup\treplicate\n")
+            for info in META:
+                f.write(f"{info['sample']}\t{info['group']}\t{info.get('replicate', '')}\n")
+
+# ---------- 从 genome+GTF 生成 transcript.fa ----------
+rule make_transcript_fa:
+    input:
+        genome=config["genome_fa"],
+        gtf=config["gtf"]
+    output:
+        txfa=config["transcript_fa"]
+    log:
+        "logs/make_transcript_fa.log"
+    conda: "../env/qc_env.yml"
+    threads: 16
+    shell:
+        r"""
+        mkdir -p $(dirname {output.txfa})
+        gffread -w {output.txfa} -g {input.genome} {input.gtf} > {log} 2>&1
+        """
+
+# ---------- 生成 splici & t2g ----------
+rule build_splici:
+    input:
+        genome=config["genome_fa"],
+        gtf=config["gtf"]
+    output:
+        splici=config["splici_fa"],
+        t2g=config["txp2gene"]
+    log:
+        "logs/build_splici.log"
+    conda: "../env/qc_env.yml"
+    threads: 16
+    shell:
+        r"""
+        mkdir -p $(dirname {output.splici})
+        bash /home/user-data/Wei-data/jzh/drosophila_gut_scRNA/scripts/generate_splici.sh {input.genome} {input.gtf} {output.splici} {output.t2g} > {log} 2>&1
+        """
+        
+# ---------- salmon 索引 ----------
+rule salmon_index:
+    input:
+        config["splici_fa"]
+    output:
+        directory(config["salmon_index"])
+    log:
+        "logs/salmon_index.log"
+    conda: "../env/qc_env.yml"
+    threads: config.get("salmon_index_threads", 32)
+    shell:
+        r"""
+        salmon index -t {input} -i {output} -k 23 > {log} 2>&1
+        """
+
+rule merge_lanes:
+    input:
+        r1=lambda wc: SAMPLE_FILES[wc.sample]["r1"],
+        r2=lambda wc: SAMPLE_FILES[wc.sample]["r2"],
+    output:
+        r1=merged_r1("{sample}"),
+        r2=merged_r2("{sample}")
+    log:
+        "logs/merge_lanes/{sample}.log"
+    threads: config.get("merge_lanes_threads", 16)
+    run:
+        import os
+        import shutil
+        os.makedirs(f"data/clean/{wildcards.sample}", exist_ok=True)
+        os.makedirs("logs/merge_lanes", exist_ok=True)
+
+        def smart_merge(files, out):
+            if len(files) == 1:
+                # 只有单个文件：直接软链接，节省 I/O 和 CPU
+                if os.path.exists(out):
+                    os.remove(out)
+                os.symlink(os.path.abspath(files[0]), out)
+            else:
+                # 多个文件：合并并重新压缩
+                shell(f"cat {' '.join(files)} | pigz -dc | pigz -c -p {snakemake.threads} > {out}")
+
+        smart_merge(input.r1, output.r1)
+        smart_merge(input.r2, output.r2)
+
+
+# ---------- fastp（对 merged 后文件做清洗） ----------
+rule fastp:
+    input:
+        r1=merged_r1("{sample}"),
+        r2=merged_r2("{sample}")
+    output:
+        r1=f"data/clean/{{sample}}/{{sample}}_R1.clean.fastq.gz",
+        r2=f"data/clean/{{sample}}/{{sample}}_R2.clean.fastq.gz",
+        html=f"data/clean/{{sample}}/{{sample}}.fastp.html",
+        json=f"data/clean/{{sample}}/{{sample}}.fastp.json"
+    log:
+        "logs/fastp/{sample}.log"
+    conda: "../env/qc_env.yml"
+    threads: config["fastp_threads"]
+    resources:
+        fastp_pool=1
+    shell:
+        r"""
+        mkdir -p logs/fastp
+        fastp -i {input.r1} -I {input.r2} -o {output.r1} -O {output.r2} \
+              -w {threads} -h {output.html} -j {output.json} > {log} 2>&1
+        """
+
+# ---------- FastQC raw ----------
+rule fastqc_raw_merged:
+    input:
+        r1=merged_r1("{sample}"),
+        r2=merged_r2("{sample}")
+    output:
+        zip1=f"{config['outdir_qc']}/fastqc_raw/{{sample}}_R1.raw_fastqc.zip",
+        zip2=f"{config['outdir_qc']}/fastqc_raw/{{sample}}_R2.raw_fastqc.zip",
+    log:
+        "logs/fastqc_raw/{sample}.log"
+    conda: "../env/qc_env.yml"
+    threads: config["fastqc_threads"]
+    resources:
+        fastqc_pool=1
+    shell:
+        r"""
+        mkdir -p {config[outdir_qc]}/fastqc_raw logs/fastqc_raw
+        fastqc -t {threads} -o {config[outdir_qc]}/fastqc_raw {input.r1} {input.r2} > {log} 2>&1
+        """
+
+#                 
+rule fastqc_clean:
+    input:
+        r1=f"data/clean/{{sample}}/{{sample}}_R1.clean.fastq.gz",
+        r2=f"data/clean/{{sample}}/{{sample}}_R2.clean.fastq.gz",
+    output:
+        zip1=f"{config['outdir_qc']}/fastqc_clean/{{sample}}_R1.clean_fastqc.zip",
+        zip2=f"{config['outdir_qc']}/fastqc_clean/{{sample}}_R2.clean_fastqc.zip",
+    log:
+        "logs/fastqc_clean/{sample}.log"
+    conda: "../env/qc_env.yml"
+    threads: config["fastqc_threads"]
+    resources:
+        fastqc_pool=1
+    shell:
+        r"""
+        mkdir -p {config[outdir_qc]}/fastqc_clean logs/fastqc_clean
+        fastqc -t {threads} -o {config[outdir_qc]}/fastqc_clean {input.r1} {input.r2} > {log} 2>&1
+        """
+
+# ---------- MultiQC ----------
+rule multiqc:
+    input:
+        expand(f"{config['outdir_qc']}/fastqc_raw/{{sample}}_R1.raw_fastqc.zip", sample=SAMPLES),
+        expand(f"{config['outdir_qc']}/fastqc_raw/{{sample}}_R2.raw_fastqc.zip", sample=SAMPLES),
+        expand(f"{config['outdir_qc']}/fastqc_clean/{{sample}}_R1.clean_fastqc.zip", sample=SAMPLES),
+        expand(f"{config['outdir_qc']}/fastqc_clean/{{sample}}_R2.clean_fastqc.zip", sample=SAMPLES),
+        expand(f"data/clean/{{sample}}/{{sample}}.fastp.json", sample=SAMPLES),
+        "results/qc/samples_meta.tsv"
+    output:
+        html=f"{config['outdir_qc']}/multiqc/multiqc_report.html"
+    log:
+        "logs/multiqc.log"
+    conda: "../env/qc_env.yml"
+    threads: config.get("multiqc_threads", 16)
+    shell:
+        r"""
+        mkdir -p {config[outdir_qc]}/multiqc
+        multiqc . -o {config[outdir_qc]}/multiqc --force > {log} 2>&1
+        """
+
+# ---------- simpleaf quant ----------
+rule simpleaf_quant:
+    input:
+        r1=f"data/clean/{{sample}}/{{sample}}_R1.clean.fastq.gz",
+        r2=f"data/clean/{{sample}}/{{sample}}_R2.clean.fastq.gz",
+        idx=config["salmon_index"],
+        t2g=config["txp2gene"]
+    output:
+        json=f"{config['outdir_af']}/{{sample}}/quant/af_quant/quant.json"
+    log:
+        "logs/simpleaf_quant/{sample}.log"
+    params:
+        outdir=lambda wc: os.path.join(config["outdir_af"], wc.sample, "quant"),
+        tech=config["technology"],
+        resolution=config.get("resolution", "cr-like"),
+        expect_cells=config.get("expect_cells", 8000),
+        knee_mode=config.get("knee_mode", False),
+        force_cells=config.get("force_cells", None)
+    conda: "../env/qc_env.yml"
+    threads: config["quant_threads"]
+    resources:
+        simpleaf_lock=1
+    shell:
+        r"""
+        # 设置环境变量
+        export ALEVIN_FRY_HOME=$CONDA_PREFIX
+        
+        # 创建必要的目录
+        mkdir -p {params.outdir} logs/simpleaf_quant
+        
+        # 确保配置文件存在且有效
+        # 使用文件锁避免并行任务间的竞态条件
+        LOCK_FILE="$CONDA_PREFIX/.simpleaf_setup.lock"
+        CONFIG_FILE="$CONDA_PREFIX/simpleaf_info.json"
+        
+        # 使用 flock 确保配置文件设置的原子性
+        (
+            flock -x 200
+            if [ ! -s "$CONFIG_FILE" ]; then
+                echo "Initializing simpleaf config..." >> {log} 2>&1
+                simpleaf set-paths \
+                  --salmon $CONDA_PREFIX/bin/salmon \
+                  --alevin-fry $CONDA_PREFIX/bin/alevin-fry >> {log} 2>&1
+            fi
+        ) 200>"$LOCK_FILE"
+        
+        # 验证配置文件
+        if [ ! -s "$CONFIG_FILE" ]; then
+            echo "ERROR: simpleaf config file not created" >> {log} 2>&1
+            exit 1
+        fi
+        
+        # 显示配置内容用于调试
+        echo "Simpleaf config:" >> {log} 2>&1
+        cat "$CONFIG_FILE" >> {log} 2>&1
+        
+        # 构建 simpleaf quant 命令
+        CMD="simpleaf quant \
+          --chemistry {params.tech} \
+          --resolution {params.resolution} \
+          --reads1 {input.r1} \
+          --reads2 {input.r2} \
+          --index {input.idx} \
+          --t2g-map {input.t2g} \
+          --threads {threads} \
+          --output {params.outdir}"
+        
+        # 根据配置添加细胞数参数
+        if [ "{params.knee_mode}" = "True" ]; then
+          CMD="$CMD --knee"
+        elif [ "{params.force_cells}" != "None" ]; then
+          CMD="$CMD --forced-cells {params.force_cells}"
+        else
+          CMD="$CMD --expect-cells {params.expect_cells}"
+        fi
+        
+        # 执行命令
+        echo "Running: $CMD" >> {log} 2>&1
+        eval $CMD >> {log} 2>&1
+        
+        # Verify output was created
+        if [ ! -f "{output.json}" ]; then
+            echo "Error: quant.json not found at expected location" >&2
+            exit 1
+        fi
+        """
+# ========== 下游分析：从 alevin-fry 输出构建 AnnData ==========
+
+# ---------- 为单个样本创建 AnnData ----------
+rule create_anndata:
+    input:
+        quant=f"{config['outdir_af']}/{{sample}}/quant/af_quant/quant.json",
+        meta="results/qc/samples_meta.tsv"
+    output:
+        h5ad="results/anndata/{sample}_raw.h5ad"
+    log:
+        "logs/create_anndata/{sample}.log"
+    conda: "../env/analysis_env.yml"
+    threads: config.get("anndata_threads", 8)
+    script:
+        "../scripts/create_anndata.py"
+
+# ---------- 合并所有样本的 AnnData ----------
+rule merge_anndata:
+    input:
+        h5ads=expand("results/anndata/{sample}_raw.h5ad", sample=SAMPLES),
+        meta="results/qc/samples_meta.tsv",
+        gene_mapping="data/reference/gene_id_to_symbol.csv"
+    output:
+        h5ad="results/anndata/merged_raw.h5ad"
+    log:
+        "logs/merge_anndata.log"
+    conda: "../env/analysis_env.yml"
+    threads: config.get("anndata_threads", 8)
+    script:
+        "../scripts/merge_anndata.py"
+
+# ---------- QC 和过滤 ----------
+rule qc_filter:
+    input:
+        h5ad="results/anndata/merged_raw.h5ad"
+    output:
+        h5ad="results/anndata/merged_qc.h5ad",
+        plot="results/plots/qc_violin.pdf"
+    log:
+        "logs/qc_filter.log"
+    params:
+        min_genes=config.get("min_genes", 200),
+        min_cells=config.get("min_cells", 3),
+        max_genes=config.get("max_genes", 6000),
+        max_mito_pct=config.get("max_mito_pct", 10)
+    conda: "../env/analysis_env.yml"
+    threads: config.get("qc_threads", 8)
+    script:
+        "../scripts/qc_filter.py"
+
+# ---------- 标准化和高变基因 ----------
+rule normalize_hvg:
+    input:
+        h5ad="results/anndata/merged_qc.h5ad"
+    output:
+        h5ad="results/anndata/merged_normalized.h5ad"
+    log:
+        "logs/normalize_hvg.log"
+    params:
+        n_top_genes=config.get("n_top_genes", 2000),
+        target_sum=config.get("target_sum", 1e4)
+    conda: "../env/analysis_env.yml"
+    threads: config.get("normalize_threads", 8)
+    script:
+        "../scripts/normalize_hvg.py"
+
+# ---------- PCA 和 UMAP ----------
+rule dim_reduction:
+    input:
+        h5ad="results/anndata/merged_normalized.h5ad"
+    output:
+        h5ad="results/anndata/merged_processed.h5ad"
+    log:
+        "logs/dim_reduction.log"
+    params:
+        n_pcs=config.get("n_pcs", 50),
+        n_neighbors=config.get("n_neighbors", 15),
+        umap_min_dist=config.get("umap_min_dist", 0.5)
+    conda: "../env/analysis_env.yml"
+    threads: config.get("dim_reduction_threads", 16)
+    script:
+        "../scripts/dim_reduction.py"
+
+# ---------- 批次效应校正 ----------
+rule batch_correction:
+    input:
+        h5ad="results/anndata/merged_processed.h5ad"
+    output:
+        h5ad="results/anndata/merged_batch_corrected.h5ad",
+        plot="results/plots/batch_correction_comparison.pdf"
+    log:
+        "logs/batch_correction.log"
+    params:
+        batch_key=config.get("batch_key", "sample"),
+        method=config.get("batch_correction_method", "harmony")
+    conda: "../env/advanced_analysis_env.yml"
+    threads: config.get("batch_correction_threads", 16)
+    script:
+        "../scripts/batch_correction.py"
+
+# ---------- 聚类 ----------
+rule clustering:
+    input:
+        h5ad="results/anndata/merged_batch_corrected.h5ad"
+    output:
+        h5ad="results/anndata/merged_clustered.h5ad",
+        umap_clusters="results/plots/umap_clusters.pdf",
+        umap_groups="results/plots/umap_groups.pdf"
+    log:
+        "logs/clustering.log"
+    params:
+        resolution=config.get("leiden_resolution", 0.5)
+    conda: "../env/analysis_env.yml"
+    threads: config.get("clustering_threads", 16)
+    script:
+        "../scripts/clustering.py"
+
+# ---------- Marker 基因识别 ----------
+rule find_markers:
+    input:
+        h5ad="results/anndata/merged_clustered.h5ad"
+    output:
+        markers="results/markers/cluster_markers.csv"
+    log:
+        "logs/find_markers.log"
+    params:
+        method=config.get("marker_method", "wilcoxon"),
+        n_genes=config.get("n_marker_genes", 100)
+    conda: "../env/analysis_env.yml"
+    threads: config.get("markers_threads", 16)
+    script:
+        "../scripts/find_markers.py"
+
+# ---------- 差异表达分析（同对照组比较） ----------
+rule differential_expression:
+    input:
+        h5ad="results/anndata/merged_clustered.h5ad",
+        meta="results/qc/samples_meta.tsv"
+    output:
+        de_results="results/de/group_comparison.csv"
+    log:
+        "logs/differential_expression.log"
+    params:
+        groupby=config.get("de_groupby", "group"),
+        reference=config.get("de_reference", "Control"),
+        method=config.get("de_method", "wilcoxon")
+    conda: "../env/analysis_env.yml"
+    threads: config.get("de_threads", 16)
+    script:
+        "../scripts/differential_expression.py"
+
+# ========== 细胞类型注释 ==========
+
+# ---------- 基于 Fly Cell Atlas 的细胞类型注释 ----------
+rule cell_type_annotation:
+    input:
+        h5ad="results/anndata/merged_clustered.h5ad",
+        reference=config.get("fca_reference", "data/reference/fly_cell_atlas/s_fca_biohub_gut_10x.h5ad")
+    output:
+        annotated_h5ad="results/annotation/cell_type_annotated.h5ad",
+        predictions="results/annotation/cell_type_predictions.csv",
+        confidence="results/annotation/cell_type_confidence.csv",
+        umap_plot="results/plots/cell_type_annotation_umap.pdf",
+        summary_plot="results/plots/cell_type_annotation_summary.pdf"
+    log:
+        "logs/cell_type_annotation.log"
+    conda: "../env/analysis_env.yml"
+    threads: config.get("annotation_threads", 16)
+    script:
+        "../scripts/annotate_with_reference.py"
+
+# ---------- 肠道区域表达注释 ----------
+rule gut_region_annotation:
+    input:
+        h5ad="results/annotation/cell_type_annotated.h5ad",
+        flygut_markers=config.get("flygut_markers", "data/reference/flygut_marker/flygut_marker_genes.xlsx")
+    output:
+        h5ad="results/annotation/gut_region_annotated.h5ad",
+        region_scores="results/annotation/gut_region_scores.csv",
+        plot="results/plots/gut_region_annotation.pdf"
+    log:
+        "logs/gut_region_annotation.log"
+    conda: "../env/analysis_env.yml"
+    threads: config.get("annotation_threads", 16)
+    script:
+        "../scripts/annotate_gut_region.py"
+
+# ========== 高级分析 ==========
+
+# ---------- Per-cell-type 差异表达分析 ----------
+rule differential_expression_per_celltype:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad"
+    output:
+        output_dir=directory("results/de/per_celltype"),
+        summary="results/de/per_celltype_summary.csv",
+        plot="results/plots/de_per_celltype.pdf"
+    log:
+        "logs/de_per_celltype.log"
+    params:
+        groupby=config.get("de_groupby", "group"),
+        reference=config.get("de_reference", "Control"),
+        method=config.get("de_method", "wilcoxon"),
+        celltype_col="final_cell_type"
+    conda: "../env/analysis_env.yml"
+    threads: config.get("de_threads", 16)
+    script:
+        "../scripts/differential_expression_per_celltype.py"
+
+# ---------- 细胞比例分析 ----------
+rule cell_composition_analysis:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad"
+    output:
+        proportions="results/composition/cell_proportions.csv",
+        stats="results/composition/composition_stats.csv",
+        plot="results/plots/cell_composition.pdf"
+    log:
+        "logs/cell_composition.log"
+    params:
+        groupby=config.get("de_groupby", "group"),
+        reference=config.get("de_reference", "Control"),
+        celltype_col="final_cell_type"
+    conda: "../env/analysis_env.yml"
+    threads: config.get("composition_threads", 8)
+    script:
+        "../scripts/cell_composition_analysis.py"
+
+# ---------- Per-cell-type 富集分析 ----------
+rule enrichment_per_celltype:
+    input:
+        de_dir="results/de/per_celltype"
+    output:
+        output_dir=directory("results/enrichment/per_celltype"),
+        summary="results/enrichment/per_celltype_summary.csv",
+        plot="results/plots/enrichment_per_celltype.pdf"
+    log:
+        "logs/enrichment_per_celltype.log"
+    params:
+        organism=config.get("organism", "drosophila"),
+        pvalue_cutoff=config.get("go_pvalue_cutoff", 0.05),
+        logfc_threshold=config.get("de_logfc_threshold", 0.5)
+    conda: "../env/enrichment_env.yml"
+    threads: config.get("enrichment_threads", 16)
+    script:
+        "../scripts/enrichment_per_celltype.py"
+
+# ========== 补充分析 ==========
+
+# ---------- 补充分析1: 金属响应基因热图 ----------
+rule metal_response_analysis:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad",
+        de_results="results/de/group_comparison.csv"
+    output:
+        plot="results/figures/supplementary/metal_response_heatmap.pdf",
+        genes="results/figures/supplementary/metal_response_genes.csv"
+    log:
+        "logs/metal_response_analysis.log"
+    conda: "../env/analysis_env.yml"
+    threads: 8
+    script:
+        "../scripts/analysis_metal_response.py"
+
+# ---------- 补充分析2: 细胞类型特异性DE热图 ----------
+rule celltype_de_heatmap:
+    input:
+        de_summary="results/de/per_celltype_summary.csv",
+        de_dir="results/de/per_celltype"
+    output:
+        plot="results/figures/supplementary/celltype_de_heatmap.pdf"
+    log:
+        "logs/celltype_de_heatmap.log"
+    conda: "../env/analysis_env.yml"
+    threads: 8
+    script:
+        "../scripts/analysis_celltype_de_heatmap.py"
+
+# ---------- 补充分析3: 伪时序分析 ----------
+rule pseudotime_analysis:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad"
+    output:
+        plot="results/figures/supplementary/pseudotime_trajectory.pdf",
+        h5ad="results/annotation/pseudotime_annotated.h5ad"
+    log:
+        "logs/pseudotime_analysis.log"
+    params:
+        root_celltype="ISC",
+        celltype_col="final_cell_type"
+    conda: "../env/advanced_analysis_env.yml"
+    threads: 16
+    script:
+        "../scripts/analysis_pseudotime.py"
+
+# ---------- 补充分析4: 细胞通讯分析 ----------
+rule cell_communication:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad"
+    output:
+        plot="results/figures/supplementary/cell_communication.pdf",
+        results="results/communication/communication_results.csv"
+    log:
+        "logs/cell_communication.log"
+    params:
+        celltype_col="final_cell_type",
+        groupby="group"
+    conda: "../env/advanced_analysis_env.yml"
+    threads: 16
+    script:
+        "../scripts/analysis_cell_communication.py"
+
+# ---------- 补充分析5: 转录因子活性分析 ----------
+rule tf_activity_analysis:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad"
+    output:
+        plot="results/figures/supplementary/tf_activity.pdf",
+        scores="results/tf_analysis/tf_activity_scores.csv"
+    log:
+        "logs/tf_activity_analysis.log"
+    params:
+        organism="drosophila",
+        groupby="group"
+    conda: "../env/advanced_analysis_env.yml"
+    threads: 16
+    script:
+        "../scripts/analysis_tf_activity.py"
+
+# ========== 补充可视化与汇总 ==========
+
+# ---------- 火山图 ----------
+rule plot_volcano:
+    input:
+        de_global="results/de/group_comparison.csv",
+        de_dir="results/de/per_celltype"
+    output:
+        plot="results/plots/volcano_global.pdf",
+        per_celltype_dir=directory("results/plots/volcano_per_celltype")
+    log:
+        "logs/plot_volcano.log"
+    params:
+        logfc_threshold=config.get("de_logfc_threshold", 1.0),
+        pvalue_threshold=0.05
+    conda: "../env/analysis_env.yml"
+    threads: 8
+    script:
+        "../scripts/plot_volcano.py"
+
+# ---------- UpSet图（DEG重叠分析） ----------
+rule plot_upset:
+    input:
+        de_global="results/de/group_comparison.csv",
+        de_dir="results/de/per_celltype"
+    output:
+        plot="results/plots/upset_deg_overlap.pdf",
+        overlap_csv="results/de/deg_overlap.csv"
+    log:
+        "logs/plot_upset.log"
+    params:
+        logfc_threshold=config.get("de_logfc_threshold", 1.0),
+        pvalue_threshold=0.05
+    conda: "../env/analysis_env.yml"
+    threads: 8
+    script:
+        "../scripts/plot_upset.py"
+
+# ---------- 统计汇总表格 ----------
+rule generate_summary_tables:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad",
+        de_global="results/de/group_comparison.csv",
+        de_summary="results/de/per_celltype_summary.csv",
+        composition="results/composition/composition_stats.csv"
+    output:
+        output_dir=directory("results/summary")
+    log:
+        "logs/generate_summary_tables.log"
+    conda: "../env/analysis_env.yml"
+    threads: 8
+    script:
+        "../scripts/generate_summary_tables.py"
+
+# ---------- 通路网络图 ----------
+rule plot_pathway_network:
+    input:
+        enrichment_dir="results/enrichment"
+    output:
+        plot="results/plots/pathway_network.pdf",
+        network_csv="results/enrichment/pathway_network.csv"
+    log:
+        "logs/plot_pathway_network.log"
+    params:
+        top_n=30,
+        pvalue_threshold=0.05
+    conda: "../env/analysis_env.yml"
+    threads: 8
+    script:
+        "../scripts/plot_pathway_network.py"
+
+# ---------- 补充分析6: Marker基因热图 ----------
+rule plot_marker_heatmap:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad",
+        markers="results/markers/cluster_markers.csv"
+    output:
+        heatmap="results/plots/marker_heatmap.pdf",
+        dotplot="results/plots/marker_dotplot.pdf"
+    log:
+        "logs/plot_marker_visualization.log"
+    params:
+        n_genes=10,
+        celltype_col="final_cell_type"
+    conda: "../env/analysis_env.yml"
+    threads: 8
+    script:
+        "../scripts/plot_marker_visualization.py"
+
+# ---------- 补充分析7: 出版级图表 ----------
+rule generate_publication_figures:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad",
+        pseudotime_h5ad="results/annotation/pseudotime_annotated.h5ad",
+        de_summary="results/de/per_celltype_summary.csv",
+        composition="results/composition/cell_proportions.csv",
+        enrichment_summary="results/enrichment/per_celltype_summary.csv",
+        region_scores="results/annotation/gut_region_scores.csv",
+        comm_results="results/communication/communication_results.csv",
+        tf_scores="results/tf_analysis/tf_activity_scores.csv"
+    output:
+        output_dir=directory("results/figures/publication")
+    log:
+        "logs/generate_publication_figures.log"
+    params:
+        celltype_col="final_cell_type",
+        groupby="group"
+    conda: "../env/analysis_env.yml"
+    threads: 8
+    script:
+        "../scripts/generate_publication_figures.py"
+
+# ---------- 补充分析8: 最终分析报告 ----------
+rule generate_final_report:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad",
+        de_summary="results/de/per_celltype_summary.csv",
+        composition="results/composition/composition_stats.csv",
+        enrichment_summary="results/enrichment/per_celltype_summary.csv",
+        summary_dir="results/summary",
+        publication_dir="results/figures/publication"
+    output:
+        report="results/reports/final_report.html"
+    log:
+        "logs/generate_final_report.log"
+    conda: "../env/analysis_env.yml"
+    threads: 4
+    script:
+        "../scripts/generate_final_report.py"
+
+# ========== 交互式可视化 (CellxGene) - 必须放在最后 ==========
+
+# ---------- CellxGene 可视化数据准备 ----------
+# 依赖所有分析完成后执行
+rule prepare_cellxgene:
+    input:
+        h5ad="results/annotation/gut_region_annotated.h5ad",
+        de_summary="results/de/per_celltype_summary.csv",
+        composition="results/composition/cell_proportions.csv",
+        # 确保所有补充分析完成
+        metal_plot="results/figures/supplementary/metal_response_heatmap.pdf",
+        celltype_de_plot="results/figures/supplementary/celltype_de_heatmap.pdf",
+        pseudotime_h5ad="results/annotation/pseudotime_annotated.h5ad",
+        comm_results="results/communication/communication_results.csv",
+        tf_scores="results/tf_analysis/tf_activity_scores.csv",
+        # 确保新增分析完成
+        marker_heatmap="results/plots/marker_heatmap.pdf",
+        publication_dir="results/figures/publication",
+        final_report="results/reports/final_report.html"
+    output:
+        h5ad="results/visualization/cellxgene_data.h5ad",
+        info="results/visualization/cellxgene_info.md"
+    log:
+        "logs/prepare_cellxgene.log"
+    conda: "../env/analysis_env.yml"
+    threads: config.get("visualization_threads", 8)
+    script:
+        "../scripts/prepare_cellxgene.py"

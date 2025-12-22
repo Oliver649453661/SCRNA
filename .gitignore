@@ -1,0 +1,14 @@
+*.pyc
+__pycache__/
+.snakemake/
+.vscode/
+
+drosophila_gut_RNA_seq/*
+!drosophila_gut_RNA_seq/Snakefile
+!drosophila_gut_RNA_seq/scripts/
+
+drosophila_gut_scRNA/*
+!drosophila_gut_scRNA/scripts/
+!drosophila_gut_scRNA/workflow/
+drosophila_gut_scRNA/workflow/*
+!drosophila_gut_scRNA/workflow/Snakefile

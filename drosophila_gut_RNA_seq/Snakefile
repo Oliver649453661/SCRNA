@@ -1,0 +1,145 @@
+# Import required modules
+import os
+import yaml
+from snakemake.utils import min_version
+
+# Enforce minimum Snakemake version
+min_version("7.0")
+
+# Load configuration
+configfile: "config/config.yaml"
+
+# Define samples from the data directory
+SAMPLES, = glob_wildcards(os.path.join(config["data_dir"], "{sample}_R1.fastq.gz"))
+
+# Define all possible outputs
+rule all:
+    input:
+        # FastQC reports
+        expand("results/fastqc/{sample}_R1_fastqc.html", sample=SAMPLES),
+        expand("results/fastqc/{sample}_R2_fastqc.html", sample=SAMPLES),
+        # Trimmed reads
+        expand("results/trimmed/{sample}_R1_trimmed.fastq.gz", sample=SAMPLES),
+        expand("results/trimmed/{sample}_R2_trimmed.fastq.gz", sample=SAMPLES),
+        # Alignment
+        expand("results/alignments/{sample}.bam", sample=SAMPLES),
+        # Count matrix
+        "results/counts/counts.tsv",
+        # Differential expression
+        "results/diffexp/diff_genes.csv",
+        # QC reports
+        "results/multiqc_report.html"
+
+# Quality control with FastQC
+rule fastqc:
+    input:
+        r1 = os.path.join(config["data_dir"], "{sample}_R1.fastq.gz"),
+        r2 = os.path.join(config["data_dir"], "{sample}_R2.fastq.gz")
+    output:
+        r1 = "results/fastqc/{sample}_R1_fastqc.html",
+        r2 = "results/fastqc/{sample}_R2_fastqc.html"
+    log:
+        "logs/fastqc/{sample}.log"
+    conda:
+        "envs/fastqc.yaml"
+    shell:
+        "fastqc {input.r1} {input.r2} -o results/fastqc/ &> {log}"
+
+# Trim reads with Trimmomatic
+rule trim_reads:
+    input:
+        r1 = os.path.join(config["data_dir"], "{sample}_R1.fastq.gz"),
+        r2 = os.path.join(config["data_dir"], "{sample}_R2.fastq.gz")
+    output:
+        r1 = "results/trimmed/{sample}_R1_trimmed.fastq.gz",
+        r1_unpaired = "results/trimmed/{sample}_R1_unpaired.fastq.gz",
+        r2 = "results/trimmed/{sample}_R2_trimmed.fastq.gz",
+        r2_unpaired = "results/trimmed/{sample}_R2_unpaired.fastq.gz"
+    log:
+        "logs/trimming/{sample}.log"
+    conda:
+        "envs/trimmomatic.yaml"
+    shell:
+        "trimmomatic PE -threads {threads} {input.r1} {input.r2} "
+        "{output.r1} {output.r1_unpaired} {output.r2} {output.r2_unpaired} "
+        "ILLUMINACLIP:{config[adapters]}:2:30:10 "
+        "LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36 "
+        "&> {log}"
+
+# Align reads with STAR
+rule align_star:
+    input:
+        r1 = "results/trimmed/{sample}_R1_trimmed.fastq.gz",
+        r2 = "results/trimmed/{sample}_R2_trimmed.fastq.gz",
+        index = config["star_index"]
+    output:
+        "results/alignments/{sample}.bam"
+    log:
+        "logs/star/{sample}.log"
+    conda:
+        "envs/star.yaml"
+    threads: 8
+    shell:
+        "STAR --runThreadN {threads} "
+        "--genomeDir {input.index} "
+        "--readFilesIn {input.r1} {input.r2} "
+        "--readFilesCommand zcat "
+        "--outSAMtype BAM SortedByCoordinate "
+        "--outBAMsortingThreadN {threads} "
+        "--outFileNamePrefix results/alignments/{wildcards.sample}_ "
+        "--quantMode GeneCounts "
+        "&> {log} && "
+        "mv results/alignments/{wildcards.sample}_Aligned.sortedByCoord.out.bam {output} && "
+        "samtools index {output}"
+
+# Count reads with featureCounts
+rule count_reads:
+    input:
+        bams = expand("results/alignments/{sample}.bam", sample=SAMPLES),
+        gtf = config["gtf"]
+    output:
+        "results/counts/counts.tsv"
+    log:
+        "logs/featureCounts/counts.log"
+    conda:
+        "envs/subread.yaml"
+    shell:
+        "featureCounts -T {threads} -p -t exon -g gene_id -a {input.gtf} "
+        "-o {output} {input.bams} &> {log}"
+
+# Run MultiQC for report generation
+rule multiqc:
+    input:
+        "results/fastqc",
+        "results/trimmed",
+        "results/alignments"
+    output:
+        "results/multiqc_report.html"
+    conda:
+        "envs/multiqc.yaml"
+    log:
+        "logs/multiqc.log"
+    shell:
+        "multiqc results/ -o results/ &> {log}"
+
+# Differential expression analysis with DESeq2
+rule deseq2:
+    input:
+        counts = "results/counts/counts.tsv",
+        metadata = config["metadata"]
+    output:
+        "results/diffexp/diff_genes.csv"
+    conda:
+        "envs/deseq2.yaml"
+    script:
+        "scripts/run_deseq2.R"
+
+# Create report
+rule report:
+    input:
+        "results/multiqc_report.html",
+        "results/diffexp/diff_genes.csv"
+    output:
+        "report.html"
+    script:
+        "scripts/generate_report.R"
