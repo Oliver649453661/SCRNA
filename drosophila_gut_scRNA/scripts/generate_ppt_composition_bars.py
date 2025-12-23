@@ -212,8 +212,10 @@ def plot_stacked_bar(ax, pivot_df, title):
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    pdf_path = os.path.join(args.output_dir, f"{args.basename}.pdf")
-    png_path = os.path.join(args.output_dir, f"{args.basename}.png")
+    celltype_pdf_path = os.path.join(args.output_dir, f"{args.basename}_celltype.pdf")
+    celltype_png_path = os.path.join(args.output_dir, f"{args.basename}_celltype.png")
+    region_pdf_path = os.path.join(args.output_dir, f"{args.basename}_region.pdf")
+    region_png_path = os.path.join(args.output_dir, f"{args.basename}_region.png")
 
     celltype_df, group_order = load_and_prepare_celltype_data(
         args.composition, args.groups, args.top_celltypes
@@ -227,16 +229,21 @@ def main():
     print(f"Regions displayed: {list(region_df.columns)}")
 
     set_publication_style()
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7), sharey=True, sharex=True)
-    plot_stacked_bar(axes[0], celltype_df, "Cell-Type Composition")
-    plot_stacked_bar(axes[1], region_df, "Gut Region Composition")
-    axes[1].set_ylabel("")
+    fig_celltype, ax_celltype = plt.subplots(figsize=(8, 7))
+    plot_stacked_bar(ax_celltype, celltype_df, "Cell-Type Composition")
+    fig_celltype.tight_layout()
+    fig_celltype.savefig(celltype_pdf_path, bbox_inches="tight", dpi=300)
+    fig_celltype.savefig(celltype_png_path, bbox_inches="tight", dpi=300)
+    plt.close(fig_celltype)
+    print(f"Saved cell-type stacked bar chart to: {celltype_pdf_path} and {celltype_png_path}")
 
-    plt.tight_layout()
-    fig.savefig(pdf_path, bbox_inches="tight", dpi=300)
-    fig.savefig(png_path, bbox_inches="tight", dpi=300)
-    plt.close(fig)
-    print(f"Saved stacked bar charts to: {pdf_path} and {png_path}")
+    fig_region, ax_region = plt.subplots(figsize=(8, 7))
+    plot_stacked_bar(ax_region, region_df, "Gut Region Composition")
+    fig_region.tight_layout()
+    fig_region.savefig(region_pdf_path, bbox_inches="tight", dpi=300)
+    fig_region.savefig(region_png_path, bbox_inches="tight", dpi=300)
+    plt.close(fig_region)
+    print(f"Saved gut-region stacked bar chart to: {region_pdf_path} and {region_png_path}")
 
 
 if __name__ == "__main__":

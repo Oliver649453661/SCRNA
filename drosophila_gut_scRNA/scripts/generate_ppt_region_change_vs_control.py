@@ -176,8 +176,10 @@ def significance_label(p):
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    pdf_path = os.path.join(args.output_dir, f"{args.basename}.pdf")
-    png_path = os.path.join(args.output_dir, f"{args.basename}.png")
+    region_pdf_path = os.path.join(args.output_dir, f"{args.basename}_region.pdf")
+    region_png_path = os.path.join(args.output_dir, f"{args.basename}_region.png")
+    celltype_pdf_path = os.path.join(args.output_dir, f"{args.basename}_celltype.pdf")
+    celltype_png_path = os.path.join(args.output_dir, f"{args.basename}_celltype.png")
 
     print(f"Loading AnnData from {args.h5ad}")
     adata = sc.read_h5ad(args.h5ad)
@@ -260,7 +262,7 @@ def main():
         }
     )
 
-    def plot_panel(ax, categories, diffs, pvals_dict, title):
+    def plot_panel(ax, categories, diffs, pvals_dict, title, show_legend=True):
         n_cat = len(categories)
         n_groups = len(comparison_groups)
         indices = np.arange(n_cat)
@@ -272,12 +274,12 @@ def main():
         )
 
         for idx, group in enumerate(comparison_groups):
-            ax.bar(
+            bars = ax.bar(
                 indices + offsets[idx],
                 diffs[idx],
                 width=bar_width,
                 color=colors[idx % len(colors)],
-                label=group if ax is axes[0] else None,
+                label=group if show_legend else None,
             )
             for j, cat in enumerate(categories):
                 star = significance_label(pvals_dict.get(cat, {}).get(group, 1.0))
@@ -299,18 +301,38 @@ def main():
         ax.set_ylabel("Change vs Control (%)")
         ax.set_title(title)
         ax.grid(axis="y", linestyle="--", alpha=0.4)
+        if show_legend:
+            ax.legend(loc="upper right")
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=False)
-    plot_panel(axes[0], regions, region_diffs, region_glm_pvals, "Gut Region Distribution Change vs Control")
-    plot_panel(axes[1], top_celltypes, celltype_diffs, celltype_glm_pvals, "Cell-Type Composition Change vs Control")
-    axes[0].legend(loc="upper right")
+    fig_region, ax_region = plt.subplots(figsize=(10, 6))
+    plot_panel(
+        ax_region,
+        regions,
+        region_diffs,
+        region_glm_pvals,
+        "Gut Region Distribution Change vs Control",
+        show_legend=True,
+    )
+    fig_region.tight_layout()
+    fig_region.savefig(region_pdf_path, bbox_inches="tight", dpi=300)
+    fig_region.savefig(region_png_path, bbox_inches="tight", dpi=300)
+    plt.close(fig_region)
+    print(f"Saved gut region change plot to: {region_pdf_path} and {region_png_path}")
 
-    plt.tight_layout()
-    fig.savefig(pdf_path, bbox_inches="tight", dpi=300)
-    fig.savefig(png_path, bbox_inches="tight", dpi=300)
-    plt.close(fig)
-
-    print(f"Saved comparison plot to: {pdf_path} and {png_path}")
+    fig_celltype, ax_celltype = plt.subplots(figsize=(10, 6))
+    plot_panel(
+        ax_celltype,
+        top_celltypes,
+        celltype_diffs,
+        celltype_glm_pvals,
+        "Cell-Type Composition Change vs Control",
+        show_legend=True,
+    )
+    fig_celltype.tight_layout()
+    fig_celltype.savefig(celltype_pdf_path, bbox_inches="tight", dpi=300)
+    fig_celltype.savefig(celltype_png_path, bbox_inches="tight", dpi=300)
+    plt.close(fig_celltype)
+    print(f"Saved cell-type change plot to: {celltype_pdf_path} and {celltype_png_path}")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Generate a publication-ready composite figure for PPT/report usage:
-- Panel A: UMAP colored by gut region annotation
-- Panel B: UMAP colored by final cell type annotation
-Outputs both PDF and PNG into results/PPT (created if missing).
+Generate publication-ready UMAP figures for PPT/report usage:
+- One image colored by gut region annotation
+- One image colored by final cell type annotation
+Each image is saved separately as PDF and PNG under results/PPT (created if missing).
 This script is standalone and does not integrate with the Snakemake workflow.
 """
 
@@ -11,6 +11,8 @@ import argparse
 import os
 import scanpy as sc
 import matplotlib.pyplot as plt
+
+DEFAULT_FIGSIZE = (10, 8)
 
 
 def set_publication_style():
@@ -27,6 +29,62 @@ def set_publication_style():
             "figure.dpi": 300,
         }
     )
+
+
+def save_single_umap(
+    adata,
+    *,
+    color,
+    title,
+    pdf_path,
+    png_path,
+    palette=None,
+    figure_size=DEFAULT_FIGSIZE,
+    legend_kwargs=None,
+):
+    if legend_kwargs is None:
+        legend_kwargs = {}
+
+    fig, ax = plt.subplots(figsize=figure_size)
+
+    sc.pl.umap(
+        adata,
+        color=color,
+        ax=ax,
+        show=False,
+        frameon=False,
+        title=title,
+        palette=palette,
+        legend_loc="right margin",
+    )
+
+    legend = ax.legend_
+    if legend is not None:
+        handles = legend.legend_handles
+        labels = [text.get_text() for text in legend.get_texts()]
+        legend.remove()
+        ax.legend(
+            handles,
+            labels,
+            loc=legend_kwargs.get("loc", "center left"),
+            bbox_to_anchor=legend_kwargs.get("bbox_to_anchor", (1.02, 0.5)),
+            borderaxespad=legend_kwargs.get("borderaxespad", 0.4),
+            frameon=False,
+            ncol=legend_kwargs.get("ncol", 1),
+            fontsize=legend_kwargs.get("fontsize", 11),
+            columnspacing=legend_kwargs.get("columnspacing", 0.8),
+            handlelength=legend_kwargs.get("handlelength", 1.4),
+            handletextpad=legend_kwargs.get("handletextpad", 0.4),
+            labelspacing=legend_kwargs.get("labelspacing", 0.8),
+        )
+
+    ax.set_xlabel("UMAP 1")
+    ax.set_ylabel("UMAP 2")
+    plt.tight_layout()
+
+    fig.savefig(pdf_path, bbox_inches="tight", dpi=300)
+    fig.savefig(png_path, bbox_inches="tight", dpi=300)
+    plt.close(fig)
 
 
 def parse_args():
@@ -63,8 +121,10 @@ def main():
     args = parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    pdf_path = os.path.join(args.output_dir, f"{args.basename}.pdf")
-    png_path = os.path.join(args.output_dir, f"{args.basename}.png")
+    region_pdf_path = os.path.join(args.output_dir, f"{args.basename}_region.pdf")
+    region_png_path = os.path.join(args.output_dir, f"{args.basename}_region.png")
+    celltype_pdf_path = os.path.join(args.output_dir, f"{args.basename}_celltype.pdf")
+    celltype_png_path = os.path.join(args.output_dir, f"{args.basename}_celltype.png")
 
     print(f"Loading AnnData from {args.h5ad}")
     adata = sc.read_h5ad(args.h5ad)
@@ -81,8 +141,6 @@ def main():
 
     set_publication_style()
 
-    fig, axes = plt.subplots(1, 2, figsize=(18, 8))
-
     region_palette = {
         "Crop": "#e41a1c",
         "R0": "#ff7f00",
@@ -96,36 +154,48 @@ def main():
     }
 
     print("Plotting UMAP colored by gut region...")
-    sc.pl.umap(
+    save_single_umap(
         adata,
         color=args.region_col,
-        ax=axes[0],
-        show=False,
-        frameon=False,
         title="UMAP · Gut Region Annotation",
+        pdf_path=region_pdf_path,
+        png_path=region_png_path,
         palette=region_palette,
+        legend_kwargs={
+            "loc": "center left",
+            "bbox_to_anchor": (1.02, 0.5),
+            "fontsize": 11,
+            "columnspacing": 0.7,
+            "handlelength": 1.2,
+            "handletextpad": 0.35,
+            "labelspacing": 0.5,
+        },
     )
 
     print("Plotting UMAP colored by cell type...")
-    sc.pl.umap(
+    save_single_umap(
         adata,
         color=args.celltype_col,
-        ax=axes[1],
-        show=False,
-        frameon=False,
         title="UMAP · Cell Type Annotation",
+        pdf_path=celltype_pdf_path,
+        png_path=celltype_png_path,
+        legend_kwargs={
+            "loc": "center left",
+            "bbox_to_anchor": (1.02, 0.5),
+            "fontsize": 10,
+            "columnspacing": 0.5,
+            "handlelength": 1.0,
+            "handletextpad": 0.3,
+            "labelspacing": 0.45,
+            "ncol": 1,
+        },
     )
 
-    for ax in axes:
-        ax.set_xlabel("UMAP 1")
-        ax.set_ylabel("UMAP 2")
-
-    plt.tight_layout()
-
-    print(f"Saving figure to {pdf_path} and {png_path}")
-    fig.savefig(pdf_path, bbox_inches="tight", dpi=300)
-    fig.savefig(png_path, bbox_inches="tight", dpi=300)
-    plt.close(fig)
+    print(
+        "Saved separate figures to:\n"
+        f"  Region:  {region_pdf_path} / {region_png_path}\n"
+        f"  Celltype:{celltype_pdf_path} / {celltype_png_path}"
+    )
 
     print("PPT UMAP figure generation completed.")
 
